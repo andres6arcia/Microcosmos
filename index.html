@@ -25,6 +25,7 @@
     border: 1px solid rgba(255,243,176,.35);
     font: 20px/44px monospace; text-align: center; cursor: pointer;
     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    touch-action: auto;
   }
   #panel {
     position: fixed;
@@ -43,6 +44,7 @@
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     display: none;
     -webkit-user-select: none;
+    touch-action: auto;
   }
   #panel.open { display: block; }
   #panel h3 { margin: 8px 0 4px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #e09f3e; }
@@ -74,6 +76,7 @@
 <canvas id="c"></canvas>
 <div id="panelToggle">≡</div>
 <div id="panel"></div>
+<div id="tip"></div>
 <div id="fps"></div>
 <script>
 "use strict";
@@ -1065,7 +1068,7 @@ html += `<h3 class="sec" data-sec="99">Seed &amp; actions <span class="chev">▾
   </div>
   <input type="file" id="importFile" accept=".json,application/json" style="display:none">
 </div>
-<div id="tip"></div>`;
+`;
 panel.innerHTML = html;
 
 // section collapse
@@ -1086,22 +1089,35 @@ panel.querySelectorAll('h3.sec').forEach(h => {
 const tip = document.getElementById('tip');
 tip.style.cssText = 'display:none;position:fixed;z-index:20;max-width:240px;background:#12181b;'+
   'border:1px solid #e09f3e;border-radius:8px;padding:10px;color:#fff3b0;font:11px/1.5 monospace;'+
-  'box-shadow:0 4px 18px rgba(0,0,0,.6)';
+  'box-shadow:0 4px 18px rgba(0,0,0,.6);touch-action:auto';
+let tipOpen = false;
 panel.querySelectorAll('.help').forEach(el => {
-  el.style.cssText = 'display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;'+
-    'border:1px solid #335c67;border-radius:50%;color:#e09f3e;cursor:pointer;margin-right:2px;font-size:10px';
-  el.addEventListener('click', e => {
+  el.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;'+
+    'width:22px;height:22px;min-width:22px;min-height:22px;padding:0;'+
+    'border:1px solid #335c67;border-radius:50%;color:#e09f3e;cursor:pointer;margin-right:2px;'+
+    'font-size:10px;touch-action:auto;-webkit-tap-highlight-color:rgba(224,159,62,.3)';
+  function showTip(e) {
     e.stopPropagation();
+    e.preventDefault();
     tip.textContent = el.dataset.desc;
     tip.style.display = 'block';
+    tipOpen = true;
     const r = el.getBoundingClientRect();
     tip.style.left = Math.min(window.innerWidth - 260, Math.max(8, r.left - 120)) + 'px';
     tip.style.top = (r.bottom + 8) + 'px';
-  });
+  }
+  el.addEventListener('pointerdown', showTip);
+  el.addEventListener('click', showTip);
 });
-document.addEventListener('click', e => {
-  if (!e.target.classList || !e.target.classList.contains('help')) tip.style.display = 'none';
-});
+function closeTip(e) {
+  if (!tipOpen) return;
+  if (e.target.classList && e.target.classList.contains('help')) return;
+  if (tip.contains(e.target)) return;
+  tip.style.display = 'none';
+  tipOpen = false;
+}
+document.addEventListener('pointerdown', closeTip);
+document.addEventListener('click', closeTip);
 
 for (const s of sliders){
   if (s[1] === null) continue;
