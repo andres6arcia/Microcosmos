@@ -119,7 +119,8 @@ const P = {
   repulsion: 1.0, attraction: 1.0, stiffness: 1.0, noise: 1.0,
   speedMul: rr(0.8, 1.3),        // random global speed at start (per spec)
   consumeRate: 1.0, fullness: 1.0, mutation: 1.0,
-  producerRate: 1.0, zoom: 1.0, trail: 0.16,
+  divisionRate: 1.0, collideMalf: 0.3,
+  producerRate: 1.0, zoom: 1.0, trail: 0.5,
   // initial populations
   nProducer: 4, nCapsule: 14, nScavenger: 8, nVortex: 3,
   nGrabber: 3, nFilament: 10, nInvader: 5, nAbsorber: 4, nFree: 220,
@@ -239,6 +240,8 @@ class Auto {
       affinity: m(pp ? pp.affinity : rr(.3, 1.6), .2),
     };
     this.wob = rnd()*Math.PI*2;
+    // expected body radius (used to detach runaway particles)
+    this.bodyR = [14, 24, 7, 26, 55, 30, 6, 18, 36][type] * this.g.size;
     autos.set(this.id, this);
     buildBody(this);
   }
@@ -392,7 +395,7 @@ function damage(a, amt){
 /* ---------------- Split (fission) ---------------- */
 function trySplit(a){
   if (a.state === S.SPLIT || a.type === T.PRODUCER || a.type === T.FILAMENT) return;
-  if (a.parts.length >= a.g.fullAt * P.fullness){
+  if (a.parts.length >= a.g.fullAt * P.fullness / Math.max(.1, P.divisionRate)){
     a.state = S.SPLIT; a.splitT = 3.2;
   }
 }
@@ -476,6 +479,12 @@ function physics(dt){
       if (d2 > minD*minD || d2 === 0) return;
       const d = Math.sqrt(d2);
       const f = rep * (1 - d/minD) / d;
+      // collision-induced dysfunction between distinct automatons
+      if (P.collideMalf > 0 && powner[i] >= 0 && powner[j] >= 0 &&
+          powner[i] !== powner[j] && rnd() < P.collideMalf * 0.0012){
+        const A = autos.get(rnd() < .5 ? powner[i] : powner[j]);
+        if (A) damage(A, 1);
+      }
       dx *= f; dy *= f;
       nudge(i, -dx, -dy); nudge(j, dx, dy);
     });
@@ -535,6 +544,19 @@ function behave(a, dt){
   a.t += dt;
   const n = centroid(a);
   if (n === 0){ autos.delete(a.id); return; }
+
+  // runaway particles: anything beyond ~3x the body radius detaches as free material
+  const limit2 = (a.bodyR * 3 + 24) ** 2;
+  for (let k = a.parts.length - 1; k >= 0; k--){
+    const i = a.parts[k];
+    if (!alive[i]){ a.parts.splice(k,1); continue; }
+    if ((px[i]-a.x)**2 + (py[i]-a.y)**2 > limit2){
+      a.parts.splice(k,1);
+      for (let b = a.bonds.a.length-1; b >= 0; b--)
+        if (a.bonds.a[b] === i || a.bonds.b[b] === i) a.bonds.removeAt(b);
+      freeMat(i);
+    }
+  }
 
   /* ---- state timers ---- */
   if (a.state === S.MALF){
@@ -793,8 +815,8 @@ function render(){
   ctx.fillRect(0,0,W,H);
 
   ctx.save();
-  // zoom about centre
-  ctx.translate(W/2, H/2); ctx.scale(P.zoom, P.zoom); ctx.translate(-W/2, -H/2);
+  // camera: zoom about centre + pan offset
+  ctx.translate(W/2, H/2); ctx.scale(P.zoom, P.zoom); ctx.translate(-cam.x, -cam.y);
   ctx.globalCompositeOperation = 'lighter';
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
@@ -810,7 +832,8 @@ function render(){
       ctx.beginPath();
       let started = false, lx=0, ly=0;
       for (const i of a.parts){ if (!alive[i]) continue;
-        if (!started){ ctx.moveTo(px[i], py[i]); started = true; }
+        const gap = started && ((px[i]-lx)**2 + (py[i]-ly)**2 > 60*60);
+        if (!started || gap){ ctx.moveTo(px[i], py[i]); started = true; }
         else ctx.quadraticCurveTo(lx, ly, (lx+px[i])/2, (ly+py[i])/2);
         lx = px[i]; ly = py[i];
       }
@@ -825,10 +848,14 @@ function render(){
         ctx.strokeStyle = col; ctx.globalAlpha = .45*glow; ctx.lineWidth = 2;
         ctx.beginPath();
         const n = ring.length;
+        let pen = false;
         for (let k = 0; k <= n; k++){
           const i = ring[k%n], j = ring[(k+1)%n];
           const mx = (px[i]+px[j])/2, my = (py[i]+py[j])/2;
-          if (k===0) ctx.moveTo(mx,my); else ctx.quadraticCurveTo(px[i],py[i],mx,my);
+          // if consecutive points are too far apart, lift the pen (avoids giant membranes)
+          if ((px[j]-px[i])**2 + (py[j]-py[i])**2 > 60*60){ pen = false; continue; }
+          if (!pen){ ctx.moveTo(mx,my); pen = true; }
+          else ctx.quadraticCurveTo(px[i],py[i],mx,my);
         }
         ctx.stroke();
       }
@@ -883,10 +910,16 @@ function render(){
   ctx.globalAlpha = 1;
 }
 
-/* ---------------- Interaction ---------------- */
-let pointerDown = false, pinchD = 0;
+/* ---------------- Interaction & camera ---------------- */
+const cam = { x: W/2, y: H/2 };   // world point at screen centre
+function clampCam(){
+  P.zoom = Math.min(4, Math.max(.5, P.zoom));
+  const hw = W/(2*P.zoom), hh = H/(2*P.zoom);
+  cam.x = Math.min(W - hw + 60, Math.max(hw - 60, cam.x));
+  cam.y = Math.min(H - hh + 60, Math.max(hh - 60, cam.y));
+}
 function screenToWorld(x, y){
-  return [ (x - W/2)/P.zoom + W/2, (y - H/2)/P.zoom + H/2 ];
+  return [ (x - W/2)/P.zoom + cam.x, (y - H/2)/P.zoom + cam.y ];
 }
 function disturb(x, y, drag){
   const [wx, wy] = screenToWorld(x, y);
@@ -901,23 +934,67 @@ function disturb(x, y, drag){
     if (d < 70) nudge(j, dx/d * (70-d)*.09, dy/d * (70-d)*.09);
   });
 }
-cv.addEventListener('pointerdown', e => { pointerDown = true; disturb(e.clientX, e.clientY, false); });
-cv.addEventListener('pointermove', e => { if (pointerDown) disturb(e.clientX, e.clientY, true); });
-window.addEventListener('pointerup', () => pointerDown = false);
+// ---- mouse: left = disturb, right-drag = pan, wheel = zoom ----
+let leftDown = false, rightDown = false, lastMX = 0, lastMY = 0;
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('mousedown', e => {
+  lastMX = e.clientX; lastMY = e.clientY;
+  if (e.button === 2) rightDown = true;
+  else { leftDown = true; disturb(e.clientX, e.clientY, false); }
+});
+window.addEventListener('mousemove', e => {
+  if (rightDown){
+    cam.x -= (e.clientX - lastMX)/P.zoom;
+    cam.y -= (e.clientY - lastMY)/P.zoom;
+    clampCam();
+  } else if (leftDown) disturb(e.clientX, e.clientY, true);
+  lastMX = e.clientX; lastMY = e.clientY;
+});
+window.addEventListener('mouseup', () => { leftDown = false; rightDown = false; });
 cv.addEventListener('wheel', e => {
   e.preventDefault();
-  P.zoom = Math.min(3, Math.max(.5, P.zoom * (e.deltaY < 0 ? 1.08 : .93)));
-  syncPanel();
+  // zoom toward the cursor position
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  P.zoom *= (e.deltaY < 0 ? 1.08 : .93);
+  clampCam();
+  const [wx2, wy2] = screenToWorld(e.clientX, e.clientY);
+  cam.x += wx - wx2; cam.y += wy - wy2;
+  clampCam();
 }, { passive:false });
+// ---- touch: one finger = disturb, two fingers = pinch zoom + pan ----
+let pinchD = 0, pinchMX = 0, pinchMY = 0, touchPan = false;
+cv.addEventListener('touchstart', e => {
+  if (e.touches.length === 2){
+    touchPan = true;
+    pinchD = Math.hypot(e.touches[0].clientX-e.touches[1].clientX,
+                        e.touches[0].clientY-e.touches[1].clientY);
+    pinchMX = (e.touches[0].clientX+e.touches[1].clientX)/2;
+    pinchMY = (e.touches[0].clientY+e.touches[1].clientY)/2;
+  } else if (e.touches.length === 1 && !touchPan){
+    disturb(e.touches[0].clientX, e.touches[0].clientY, false);
+  }
+}, { passive:true });
 cv.addEventListener('touchmove', e => {
   if (e.touches.length === 2){
     const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX,
                          e.touches[0].clientY-e.touches[1].clientY);
-    if (pinchD) { P.zoom = Math.min(3, Math.max(.5, P.zoom * d/pinchD)); syncPanel(); }
-    pinchD = d;
+    const mx = (e.touches[0].clientX+e.touches[1].clientX)/2;
+    const my = (e.touches[0].clientY+e.touches[1].clientY)/2;
+    if (pinchD){
+      P.zoom *= d/pinchD;               // pinch = zoom
+      cam.x -= (mx - pinchMX)/P.zoom;   // midpoint drag = pan
+      cam.y -= (my - pinchMY)/P.zoom;
+      clampCam();
+    }
+    pinchD = d; pinchMX = mx; pinchMY = my;
+  } else if (e.touches.length === 1 && !touchPan){
+    disturb(e.touches[0].clientX, e.touches[0].clientY, true);
   }
 }, { passive:true });
-cv.addEventListener('touchend', () => pinchD = 0);
+cv.addEventListener('touchend', e => {
+  if (e.touches.length < 2){ pinchD = 0; if (e.touches.length === 0) touchPan = false; }
+});
+window.addEventListener('resize', () => { cam.x = W/2; cam.y = H/2; clampCam(); });
 
 /* ---------------- Control panel ---------------- */
 const panel = document.getElementById('panel');
@@ -926,40 +1003,106 @@ toggle.addEventListener('click', () => panel.classList.toggle('open'));
 
 const sliders = [
   ['Forces', null],
-  ['repulsion','Repulsion',0,3,.05],
-  ['attraction','Attraction',0,3,.05],
-  ['stiffness','Membrane stiffness',0,3,.05],
-  ['noise','Brownian noise',0,3,.05],
+  ['repulsion','Repulsion',0,3,.05,
+    'Short-range push between particles. Higher values give structures more volume and keep bodies from overlapping; very high values make everything jittery and loose.'],
+  ['attraction','Attraction',0,3,.05,
+    'Global multiplier on all elastic bonds. Higher values pull assemblies tighter together; low values make bodies floppy and easier to tear apart.'],
+  ['stiffness','Membrane stiffness',0,3,.05,
+    'Rigidity of springs inside membranes and chains. High = firm, well-defined shapes. Low = soft, wobbly, deformable bodies that break more easily.'],
+  ['noise','Brownian noise',0,3,.05,
+    'Random thermal jitter applied to every particle. Gives the medium an organic, microscopic feel. Too high and structures shake themselves apart.'],
   ['Dynamics', null],
-  ['speedMul','Global speed',0.1,3,.05],
-  ['consumeRate','Consumption rate',0.1,3,.05],
-  ['fullness','Fullness threshold',0.3,3,.05],
-  ['mutation','Mutation level',0,3,.05],
-  ['producerRate','Producer spawn rate',0,4,.05],
-  ['View', null],
-  ['zoom','Zoom',0.5,3,.02],
-  ['trail','Trail (lower = longer)',0.03,.5,.01],
+  ['speedMul','Global speed',0.1,3,.05,
+    'Time multiplier for the whole simulation. Affects movement, behaviours and timers equally. Randomised on each Reset.'],
+  ['consumeRate','Consumption rate',0.1,3,.05,
+    'How fast automatons absorb material: filtration radius, bite speed of scavengers, and tip-ripping speed of grabbers all scale with this.'],
+  ['fullness','Fullness threshold',0.3,3,.05,
+    'How much material an automaton must accumulate before it enters the splitting phase. Higher = bigger, rarer organisms. Lower = small ones that divide often.'],
+  ['divisionRate','Division rate',0.1,3,.05,
+    'Directly scales how easily automatons divide. Above 1 they split with less material (population booms); below 1 divisions become rare and bodies grow large.'],
+  ['collideMalf','Collision dysfunction',0,2,.05,
+    'Chance that physical contact between two different automatons damages one of them, sending it into malfunction (leaking material). 0 disables collision damage; high values make the world violent and leaky.'],
+  ['mutation','Mutation level',0,3,.05,
+    'Size of the random Gaussian variation applied to a child\u2019s parameters when an automaton splits. Drives visible evolutionary drift over time.'],
+  ['producerRate','Producer spawn rate',0,4,.05,
+    'How quickly stationary producers emit new free material. This is the main energy input of the ecosystem \u2014 raise it to feed everything, lower it to starve the world.'],
   ['Initial populations (apply on Reset)', null],
-  ['nProducer','Producers',0,12,1], ['nCapsule','Capsules',0,40,1],
-  ['nScavenger','Scavengers',0,30,1], ['nVortex','Vortices',0,10,1],
-  ['nGrabber','Grabbers',0,10,1], ['nFilament','Filaments',0,30,1],
-  ['nInvader','Invaders',0,20,1], ['nAbsorber','Absorbers',0,12,1],
-  ['nFree','Free material',0,800,10],
+  ['nProducer','Producers',0,12,1,'Anchored generators that create free material. The base of the food chain.'],
+  ['nCapsule','Capsules',0,40,1,'Slow elongated drifters that filter free material from the water.'],
+  ['nScavenger','Scavengers',0,30,1,'Small fast automatons that tear particles from the edges of larger bodies.'],
+  ['nVortex','Vortices',0,10,1,'Crown-armed collectors that spin an inward current pulling free material to their core.'],
+  ['nGrabber','Grabbers',0,10,1,'Floating balls with hanging arms that rip the luminous tips off filaments.'],
+  ['nFilament','Filaments',0,30,1,'Anchored waving dashes with a bright material-rich tip \u2014 favourite prey of grabbers.'],
+  ['nInvader','Invaders',0,20,1,'Tiny parasites that attach to a host, inject material, replicate inside and burst it (lysis).'],
+  ['nAbsorber','Absorbers',0,12,1,'Membrane rings that chase and swallow smaller assemblies whole. Can fuse into collectives.'],
+  ['nFree','Free material',0,800,10,'Loose drifting particles present at start \u2014 the initial resource pool.'],
 ];
-let html = '';
+// build collapsible sections
+let html = '', secId = 0, open = true;
 for (const s of sliders){
-  if (s[1] === null){ html += `<h3>${s[0]}</h3>`; continue; }
-  const [key, name, mn, mx, st] = s;
-  html += `<label>${name}<span class="val" id="v_${key}">${P[key]}</span>
+  if (s[1] === null){
+    if (secId > 0) html += '</div>';
+    secId++;
+    html += `<h3 class="sec" data-sec="${secId}">${s[0]} <span class="chev">▾</span></h3><div class="secBody" id="sec_${secId}">`;
+    continue;
+  }
+  const [key, name, mn, mx, st, desc] = s;
+  html += `<label><span class="help" data-desc="${desc.replace(/"/g,'&quot;')}">?</span> ${name}
+    <span class="val" id="v_${key}">${P[key]}</span>
     <input type="range" id="s_${key}" min="${mn}" max="${mx}" step="${st}" value="${P[key]}"></label>`;
 }
-html += `<h3>Seed</h3><input type="number" id="seedIn" value="${SEED}">
+html += '</div>';
+html += `<h3 class="sec" data-sec="99">Seed &amp; actions <span class="chev">▾</span></h3><div class="secBody" id="sec_99">
+  <input type="number" id="seedIn" value="${SEED}">
   <div class="btns">
     <button id="btnPause">Pause</button>
     <button id="btnReset">Reset</button>
     <button id="btnRandom">Randomize all</button>
-  </div>`;
+  </div>
+  <div class="btns">
+    <button id="btnExport">Export JSON</button>
+    <button id="btnImport">Import JSON</button>
+  </div>
+  <input type="file" id="importFile" accept=".json,application/json" style="display:none">
+</div>
+<div id="tip"></div>`;
 panel.innerHTML = html;
+
+// section collapse
+panel.querySelectorAll('h3.sec').forEach(h => {
+  h.style.cursor = 'pointer';
+  h.addEventListener('click', () => {
+    const body = document.getElementById('sec_' + h.dataset.sec);
+    const hidden = body.style.display === 'none';
+    body.style.display = hidden ? '' : 'none';
+    h.querySelector('.chev').textContent = hidden ? '▾' : '▸';
+  });
+});
+// collapse populations by default to keep the panel short
+(() => { const h = panel.querySelectorAll('h3.sec')[2];
+  if (h) h.click(); })();
+
+// help popups
+const tip = document.getElementById('tip');
+tip.style.cssText = 'display:none;position:fixed;z-index:20;max-width:240px;background:#12181b;'+
+  'border:1px solid #e09f3e;border-radius:8px;padding:10px;color:#fff3b0;font:11px/1.5 monospace;'+
+  'box-shadow:0 4px 18px rgba(0,0,0,.6)';
+panel.querySelectorAll('.help').forEach(el => {
+  el.style.cssText = 'display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;'+
+    'border:1px solid #335c67;border-radius:50%;color:#e09f3e;cursor:pointer;margin-right:2px;font-size:10px';
+  el.addEventListener('click', e => {
+    e.stopPropagation();
+    tip.textContent = el.dataset.desc;
+    tip.style.display = 'block';
+    const r = el.getBoundingClientRect();
+    tip.style.left = Math.min(window.innerWidth - 260, Math.max(8, r.left - 120)) + 'px';
+    tip.style.top = (r.bottom + 8) + 'px';
+  });
+});
+document.addEventListener('click', e => {
+  if (!e.target.classList || !e.target.classList.contains('help')) tip.style.display = 'none';
+});
+
 for (const s of sliders){
   if (s[1] === null) continue;
   const key = s[0], el = document.getElementById('s_'+key);
@@ -968,10 +1111,18 @@ for (const s of sliders){
     document.getElementById('v_'+key).textContent = P[key];
   });
 }
-function syncPanel(){
-  const z = document.getElementById('s_zoom');
-  if (z){ z.value = P.zoom; document.getElementById('v_zoom').textContent = P.zoom.toFixed(2); }
+function refreshSliders(){
+  for (const s of sliders){
+    if (s[1] === null) continue;
+    const key = s[0], el = document.getElementById('s_'+key);
+    if (!el) continue;
+    el.value = P[key];
+    document.getElementById('v_'+key).textContent =
+      Number.isInteger(P[key]) ? P[key] : P[key].toFixed(2);
+  }
 }
+function syncPanel(){} // zoom no longer shown in the panel
+
 document.getElementById('btnPause').addEventListener('click', function(){
   P.paused = !P.paused; this.textContent = P.paused ? 'Resume' : 'Pause';
 });
@@ -987,11 +1138,42 @@ document.getElementById('btnRandom').addEventListener('click', () => {
     const [key,,mn,mx] = s;
     if (key.startsWith('n')) continue;
     P[key] = mn + Math.random()*(mx-mn)*.7;
-    const el = document.getElementById('s_'+key);
-    el.value = P[key];
-    document.getElementById('v_'+key).textContent = P[key].toFixed(2);
   }
+  refreshSliders();
   seedWorld();
+});
+// ---- export / import settings as JSON ----
+document.getElementById('btnExport').addEventListener('click', () => {
+  const data = { seed: SEED, params: {} };
+  for (const s of sliders){ if (s[1] !== null) data.params[s[0]] = P[s[0]]; }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'microcosmos-settings.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+document.getElementById('btnImport').addEventListener('click', () =>
+  document.getElementById('importFile').click());
+document.getElementById('importFile').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (data.params) for (const k in data.params)
+        if (k in P && typeof data.params[k] === 'number') P[k] = data.params[k];
+      if (typeof data.seed === 'number'){
+        SEED = data.seed;
+        document.getElementById('seedIn').value = SEED;
+      }
+      refreshSliders();
+      seedWorld();
+    } catch (err) { alert('Invalid settings file'); }
+  };
+  reader.readAsText(f);
+  e.target.value = '';
 });
 
 /* ---------------- Main loop with FPS-adaptive population cap ---------------- */
