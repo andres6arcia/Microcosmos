@@ -15,18 +15,22 @@
   }
   #c { position: fixed; inset: 0; display: block; background: #000; }
   /* ---- Control panel ---- */
-  #panelToggle {
+  #panelToggle, #btnPauseTop, #btnResetTop {
     position: fixed;
     top: calc(env(safe-area-inset-top, 0px) + 10px);
-    right: calc(env(safe-area-inset-right, 0px) + 10px);
     z-index: 10;
     width: 44px; height: 44px; border-radius: 50%;
     background: rgba(51,92,103,.55); color: #fff3b0;
     border: 1px solid rgba(255,243,176,.35);
-    font: 20px/44px monospace; text-align: center; cursor: pointer;
+    font: 16px/44px monospace; text-align: center; cursor: pointer;
     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
     touch-action: auto;
+    -webkit-user-select: none; user-select: none;
   }
+  #panelToggle { right: calc(env(safe-area-inset-right, 0px) + 10px); font-size: 20px; }
+  #btnPauseTop { right: calc(env(safe-area-inset-right, 0px) + 64px); }
+  #btnResetTop { right: calc(env(safe-area-inset-right, 0px) + 118px); }
+  #btnPauseTop:active, #btnResetTop:active { background: #9e2a2b; }
   #panel {
     position: fixed;
     top: calc(env(safe-area-inset-top, 0px) + 62px);
@@ -74,6 +78,8 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="btnResetTop" title="Reset">↻</div>
+<div id="btnPauseTop" title="Pause">❚❚</div>
 <div id="panelToggle">≡</div>
 <div id="panel"></div>
 <div id="tip"></div>
@@ -125,8 +131,9 @@ const P = {
   divisionRate: 1.0, collideMalf: 0.3,
   producerRate: 1.0, zoom: 1.0, trail: 0.5,
   // initial populations
-  nProducer: 4, nCapsule: 14, nScavenger: 8, nVortex: 0,
-  nGrabber: 3, nFilament: 10, nInvader: 5, nAbsorber: 4, nFree: 220,
+  nProducer: 10, nCapsule: 10, nScavenger: 8, nVortex: 0,
+  nGrabber: 3, nFilament: 18, nInvader: 3, nAbsorber: 1, nFree: 220,
+  minAutoReset: 2,
   paused: false,
 };
 
@@ -949,23 +956,28 @@ function disturb(x, y, drag){
     if (d < 70) nudge(j, dx/d * (70-d)*.09, dy/d * (70-d)*.09);
   });
 }
-// ---- mouse: left = disturb, right-drag = pan, wheel = zoom ----
-let leftDown = false, rightDown = false, lastMX = 0, lastMY = 0;
+// ---- mouse: left = disturb, middle-drag (wheel click) = pan, wheel = zoom ----
+let leftDown = false, midDown = false, lastMX = 0, lastMY = 0;
 cv.addEventListener('contextmenu', e => e.preventDefault());
+// Suppress the browser's default auto-scroll cursor on middle mousedown
+cv.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 cv.addEventListener('mousedown', e => {
   lastMX = e.clientX; lastMY = e.clientY;
-  if (e.button === 2) rightDown = true;
-  else { leftDown = true; disturb(e.clientX, e.clientY, false); }
+  if (e.button === 1) { midDown = true; e.preventDefault(); }
+  else if (e.button === 0) { leftDown = true; disturb(e.clientX, e.clientY, false); }
 });
 window.addEventListener('mousemove', e => {
-  if (rightDown){
+  if (midDown){
     cam.x -= (e.clientX - lastMX)/P.zoom;
     cam.y -= (e.clientY - lastMY)/P.zoom;
     clampCam();
   } else if (leftDown) disturb(e.clientX, e.clientY, true);
   lastMX = e.clientX; lastMY = e.clientY;
 });
-window.addEventListener('mouseup', () => { leftDown = false; rightDown = false; });
+window.addEventListener('mouseup', e => {
+  if (e.button === 1) midDown = false;
+  else if (e.button === 0) leftDown = false;
+});
 cv.addEventListener('wheel', e => {
   e.preventDefault();
   // zoom toward the cursor position
@@ -1027,7 +1039,7 @@ const sliders = [
   ['noise','Brownian noise',0,3,.05,
     'Random thermal jitter applied to every particle. Gives the medium an organic, microscopic feel. Too high and structures shake themselves apart.'],
   ['nVortex','Vortices',0,10,1,
-    'Crown-armed collectors that spin an inward current pulling free material to their core. Applied on Reset.'],
+    'Crown-armed collectors that spin an inward current pulling free material to their core. Applied on Reset.','vortex'],
   ['Dynamics', null],
   ['speedMul','Global speed',0.1,3,.05,
     'Time multiplier for the whole simulation. Affects movement, behaviours and timers equally. Randomised on each Reset.'],
@@ -1043,14 +1055,16 @@ const sliders = [
     'Size of the random Gaussian variation applied to a child\u2019s parameters when an automaton splits. Drives visible evolutionary drift over time.'],
   ['producerRate','Producer spawn rate',0,4,.05,
     'How quickly stationary producers emit new free material. This is the main energy input of the ecosystem \u2014 raise it to feed everything, lower it to starve the world.'],
+  ['minAutoReset','Auto-reset threshold',0,20,1,
+    'When the number of living automatons drops to this value or below, the simulation is reset automatically. Prevents the world from becoming empty. Set to 0 to disable.'],
   ['Initial populations (apply on Reset)', null],
-  ['nProducer','Producers',0,12,1,'Anchored generators that create free material. The base of the food chain.'],
-  ['nCapsule','Capsules',0,40,1,'Slow elongated drifters that filter free material from the water.'],
-  ['nScavenger','Scavengers',0,30,1,'Small fast automatons that tear particles from the edges of larger bodies.'],
-  ['nGrabber','Grabbers',0,10,1,'Floating balls with hanging arms that rip the luminous tips off filaments.'],
-  ['nFilament','Filaments',0,30,1,'Anchored waving dashes with a bright material-rich tip \u2014 favourite prey of grabbers.'],
-  ['nInvader','Invaders',0,20,1,'Tiny parasites that attach to a host, inject material, replicate inside and burst it (lysis).'],
-  ['nAbsorber','Absorbers',0,12,1,'Membrane rings that chase and swallow smaller assemblies whole. Can fuse into collectives.'],
+  ['nProducer','Producers',0,12,1,'Anchored generators that create free material. The base of the food chain.','producer'],
+  ['nCapsule','Capsules',0,40,1,'Slow elongated drifters that filter free material from the water.','capsule'],
+  ['nScavenger','Scavengers',0,30,1,'Small fast automatons that tear particles from the edges of larger bodies.','scavenger'],
+  ['nGrabber','Grabbers',0,10,1,'Floating balls with hanging arms that rip the luminous tips off filaments.','grabber'],
+  ['nFilament','Filaments',0,30,1,'Anchored waving dashes with a bright material-rich tip \u2014 favourite prey of grabbers.','filament'],
+  ['nInvader','Invaders',0,20,1,'Tiny parasites that attach to a host, inject material, replicate inside and burst it (lysis).','invader'],
+  ['nAbsorber','Absorbers',0,12,1,'Membrane rings that chase and swallow smaller assemblies whole. Can fuse into collectives.','absorber'],
   ['nFree','Free material',0,800,10,'Loose drifting particles present at start \u2014 the initial resource pool.'],
 ];
 // build collapsible sections
@@ -1062,8 +1076,9 @@ for (const s of sliders){
     html += `<h3 class="sec" data-sec="${secId}">${s[0]} <span class="chev">▾</span></h3><div class="secBody" id="sec_${secId}">`;
     continue;
   }
-  const [key, name, mn, mx, st, desc] = s;
-  html += `<label><span class="help" data-desc="${desc.replace(/"/g,'&quot;')}">?</span> ${name}
+  const [key, name, mn, mx, st, desc, preview] = s;
+  const prevAttr = preview ? ` data-preview="${preview}"` : '';
+  html += `<label><span class="help" data-desc="${desc.replace(/"/g,'&quot;')}"${prevAttr}>?</span> ${name}
     <span class="val" id="v_${key}">${P[key]}</span>
     <input type="range" id="s_${key}" min="${mn}" max="${mx}" step="${st}" value="${P[key]}"></label>`;
 }
@@ -1071,8 +1086,6 @@ html += '</div>';
 html += `<h3 class="sec" data-sec="99">Seed &amp; actions <span class="chev">▾</span></h3><div class="secBody" id="sec_99">
   <input type="number" id="seedIn" value="${SEED}">
   <div class="btns">
-    <button id="btnPause">Pause</button>
-    <button id="btnReset">Reset</button>
     <button id="btnRandom">Randomize all</button>
   </div>
   <div class="btns">
@@ -1103,7 +1116,177 @@ const tip = document.getElementById('tip');
 tip.style.cssText = 'display:none;position:fixed;z-index:20;max-width:240px;background:#12181b;'+
   'border:1px solid #e09f3e;border-radius:8px;padding:10px;color:#fff3b0;font:11px/1.5 monospace;'+
   'box-shadow:0 4px 18px rgba(0,0,0,.6);touch-action:auto';
-let tipOpen = false;
+let tipOpen = false, tipAnimHandle = 0, tipAnimT0 = 0;
+
+/* ---- Animated automaton previews (drawn on a tiny canvas inside the tip) ---- */
+const PREV_W = 220, PREV_H = 90;
+const PC = { teal:'#335c67', cream:'#fff3b0', gold:'#e09f3e', red:'#9e2a2b', wine:'#540b0e' };
+function dot(pctx, x, y, r, col){
+  pctx.fillStyle = col; pctx.beginPath();
+  pctx.arc(x, y, r, 0, Math.PI*2); pctx.fill();
+}
+function drawPreview(key, pctx, t){
+  pctx.clearRect(0, 0, PREV_W, PREV_H);
+  const cx = PREV_W/2, cy = PREV_H/2;
+  switch (key){
+    case 'producer': {
+      // anchored core + pulsing ring of 7, occasional emitted motes drifting outward
+      const pulse = 1 + 0.08*Math.sin(t*2.2);
+      for (let i = 0; i < 7; i++){
+        const a = i/7*Math.PI*2;
+        dot(pctx, cx + Math.cos(a)*13*pulse, cy + Math.sin(a)*13*pulse, 2.4, PC.teal);
+      }
+      dot(pctx, cx, cy, 4.6, PC.red);
+      // emitted free material
+      for (let k = 0; k < 5; k++){
+        const phase = (t*0.6 + k*0.2) % 1;
+        const a = (k*1.7 + t*0.3);
+        const rad = 18 + phase*38;
+        const alpha = 1 - phase;
+        pctx.globalAlpha = alpha;
+        dot(pctx, cx + Math.cos(a)*rad, cy + Math.sin(a)*rad, 1.7, PC.gold);
+      }
+      pctx.globalAlpha = 1;
+      break;
+    }
+    case 'capsule': {
+      // elongated chain drifting sideways with sinusoidal wave, bright head
+      const n = 6, seg = 8;
+      const drift = ((t*22) % (PREV_W + 80)) - 40;
+      for (let i = 0; i < n; i++){
+        const x = drift + i*seg;
+        const y = cy + Math.sin(t*3 + i*0.6)*3;
+        const isHead = (i === n-1);
+        dot(pctx, x, y, isHead ? 3.2 : 2.6, isHead ? PC.gold : PC.teal);
+      }
+      break;
+    }
+    case 'scavenger': {
+      // tiny triangle darting, bright tip
+      const path = (t*0.35) % 1;
+      const bx = 20 + path*(PREV_W-40);
+      const by = cy + Math.sin(t*2.5)*14;
+      const rot = t*3;
+      for (let i = 0; i < 3; i++){
+        const a = i/3*Math.PI*2 + rot;
+        const x = bx + Math.cos(a)*6, y = by + Math.sin(a)*6;
+        dot(pctx, x, y, 2.2, i === 0 ? PC.cream : PC.red);
+      }
+      break;
+    }
+    case 'vortex': {
+      // core + 5 rotating arms, free particles spiraling inward
+      const armR = t*1.4;
+      dot(pctx, cx, cy, 4, PC.wine);
+      for (let j = 0; j < 5; j++){
+        const base = j/5*Math.PI*2 + armR;
+        for (let i = 1; i <= 3; i++){
+          const a = base + i*0.18;
+          const r = i*8;
+          dot(pctx, cx + Math.cos(a)*r, cy + Math.sin(a)*r, 2, PC.teal);
+        }
+      }
+      // inspiraling motes
+      for (let k = 0; k < 6; k++){
+        const phase = (t*0.5 + k*0.17) % 1;
+        const r = 42 * (1 - phase);
+        const a = -armR*1.8 + k*1.05 + phase*2;
+        pctx.globalAlpha = 0.4 + 0.6*phase;
+        dot(pctx, cx + Math.cos(a)*r, cy + Math.sin(a)*r, 1.6, PC.gold);
+      }
+      pctx.globalAlpha = 1;
+      break;
+    }
+    case 'grabber': {
+      // ball with three hanging arms swaying
+      const bx = cx + Math.sin(t*0.9)*20;
+      const by = cy - 18;
+      // ring/ball
+      for (let i = 0; i < 8; i++){
+        const a = i/8*Math.PI*2;
+        dot(pctx, bx + Math.cos(a)*7, by + Math.sin(a)*7, 2.2, PC.red);
+      }
+      dot(pctx, bx, by, 3.2, PC.gold);
+      // arms
+      for (let j = 0; j < 3; j++){
+        const sway = Math.sin(t*1.8 + j*1.1)*0.5;
+        for (let i = 1; i <= 5; i++){
+          const ang = Math.PI/2 + (j-1)*0.35 + sway*(i/5);
+          const px2 = bx + Math.cos(ang)*i*7;
+          const py2 = by + Math.sin(ang)*i*7;
+          dot(pctx, px2, py2, 1.8, PC.red);
+        }
+      }
+      break;
+    }
+    case 'filament': {
+      // anchored base, waving vertical chain, bright tip
+      const baseX = cx, baseY = PREV_H - 10;
+      // anchor
+      dot(pctx, baseX, baseY, 3, PC.wine);
+      const n = 7, seg = 9;
+      let lx = baseX, ly = baseY;
+      for (let i = 1; i <= n; i++){
+        const wave = Math.sin(t*2 + i*0.5) * (i/n) * 8;
+        const x = baseX + wave;
+        const y = baseY - i*seg;
+        const isTip = (i === n);
+        dot(pctx, x, y, isTip ? 3.4 : 1.8, isTip ? PC.cream : PC.teal);
+        lx = x; ly = y;
+      }
+      break;
+    }
+    case 'invader': {
+      // small red mote orbits a host blob then darts in
+      // host
+      for (let i = 0; i < 10; i++){
+        const a = i/10*Math.PI*2;
+        dot(pctx, cx + Math.cos(a)*12, cy + Math.sin(a)*12, 2.2, PC.teal);
+      }
+      dot(pctx, cx, cy, 3, PC.gold);
+      // invader — approaches from off-screen, orbits, disappears in
+      const cycle = (t*0.4) % 1;
+      let ix, iy;
+      if (cycle < 0.5){
+        // approach
+        const p = cycle/0.5;
+        ix = 10 + p*(cx - 30);
+        iy = 20 + p*(cy - 25);
+      } else {
+        const p = (cycle-0.5)/0.5;
+        const rad = 16 - p*14;
+        const a = p*Math.PI*4;
+        ix = cx + Math.cos(a)*rad;
+        iy = cy + Math.sin(a)*rad;
+      }
+      dot(pctx, ix, iy, 2.6, PC.red);
+      break;
+    }
+    case 'absorber': {
+      // slowly rotating membrane ring + core, swallowing a small drifter
+      const rot = t*0.6;
+      for (let i = 0; i < 12; i++){
+        const a = i/12*Math.PI*2 + rot;
+        dot(pctx, cx + Math.cos(a)*20, cy + Math.sin(a)*20, 2.6, PC.wine);
+      }
+      dot(pctx, cx, cy, 3.6, PC.gold);
+      // approaching prey
+      const cycle = (t*0.35) % 1;
+      const startX = PREV_W - 8, startY = 18;
+      const ex = startX + (cx - startX)*cycle;
+      const ey = startY + (cy - startY)*cycle;
+      const alpha = 1 - cycle*0.7;
+      pctx.globalAlpha = alpha;
+      dot(pctx, ex, ey, 2.4, PC.cream);
+      pctx.globalAlpha = 1;
+      break;
+    }
+  }
+}
+function stopTipAnim(){
+  if (tipAnimHandle){ cancelAnimationFrame(tipAnimHandle); tipAnimHandle = 0; }
+}
+
 panel.querySelectorAll('.help').forEach(el => {
   el.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;'+
     'width:22px;height:22px;min-width:22px;min-height:22px;padding:0;'+
@@ -1112,7 +1295,28 @@ panel.querySelectorAll('.help').forEach(el => {
   function showTip(e) {
     e.stopPropagation();
     e.preventDefault();
-    tip.textContent = el.dataset.desc;
+    stopTipAnim();
+    const previewKey = el.dataset.preview;
+    // rebuild tip contents
+    tip.innerHTML = '';
+    if (previewKey){
+      const cvp = document.createElement('canvas');
+      cvp.width = PREV_W; cvp.height = PREV_H;
+      cvp.style.cssText = 'display:block;width:100%;height:auto;background:#000;'+
+        'border:1px solid #335c67;border-radius:6px;margin-bottom:8px;';
+      tip.appendChild(cvp);
+      const pctx = cvp.getContext('2d');
+      tipAnimT0 = performance.now();
+      const animate = (now) => {
+        const t = (now - tipAnimT0) / 1000;
+        drawPreview(previewKey, pctx, t);
+        tipAnimHandle = requestAnimationFrame(animate);
+      };
+      tipAnimHandle = requestAnimationFrame(animate);
+    }
+    const text = document.createElement('div');
+    text.textContent = el.dataset.desc;
+    tip.appendChild(text);
     tip.style.display = 'block';
     tipOpen = true;
     const r = el.getBoundingClientRect();
@@ -1128,6 +1332,7 @@ function closeTip(e) {
   if (tip.contains(e.target)) return;
   tip.style.display = 'none';
   tipOpen = false;
+  stopTipAnim();
 }
 document.addEventListener('pointerdown', closeTip);
 document.addEventListener('click', closeTip);
@@ -1152,11 +1357,14 @@ function refreshSliders(){
 }
 function syncPanel(){} // zoom no longer shown in the panel
 
-document.getElementById('btnPause').addEventListener('click', function(){
-  P.paused = !P.paused; this.textContent = P.paused ? 'Resume' : 'Pause';
+document.getElementById('btnPauseTop').addEventListener('click', function(){
+  P.paused = !P.paused;
+  this.textContent = P.paused ? '▶' : '❚❚';
+  this.title = P.paused ? 'Resume' : 'Pause';
 });
-document.getElementById('btnReset').addEventListener('click', () => {
-  SEED = parseInt(document.getElementById('seedIn').value) || SEED;
+document.getElementById('btnResetTop').addEventListener('click', () => {
+  const seedEl = document.getElementById('seedIn');
+  if (seedEl) SEED = parseInt(seedEl.value) || SEED;
   seedWorld();
 });
 document.getElementById('btnRandom').addEventListener('click', () => {
@@ -1208,10 +1416,17 @@ document.getElementById('importFile').addEventListener('change', e => {
 /* ---------------- Main loop with FPS-adaptive population cap ---------------- */
 const fpsEl = document.getElementById('fps');
 let last = performance.now(), acc = 0, frames = 0, fps = 60, fpsT = 0;
+let autoResetCooldown = 4;   // seconds before auto-reset can fire again
 function loop(now){
   requestAnimationFrame(loop);
   let dt = (now - last) / 1000; last = now;
   if (dt > .1) dt = .1;          // tab-return clamp
+  // auto-reset when population collapses below threshold
+  autoResetCooldown -= dt;
+  if (!P.paused && P.minAutoReset > 0 && autos.size <= P.minAutoReset && autoResetCooldown <= 0){
+    seedWorld();
+    autoResetCooldown = 4;
+  }
   frames++; fpsT += dt;
   if (fpsT >= 1){
     fps = frames / fpsT; frames = 0; fpsT = 0;
