@@ -133,7 +133,7 @@ const P = {
   // initial populations
   nProducer: 10, nCapsule: 10, nScavenger: 8, nVortex: 0,
   nGrabber: 3, nFilament: 18, nInvader: 3, nAbsorber: 1, nFree: 220,
-  minAutoReset: 2,
+  nMinAutoReset: 2,
   paused: false,
 };
 
@@ -1055,7 +1055,7 @@ const sliders = [
     'Size of the random Gaussian variation applied to a child\u2019s parameters when an automaton splits. Drives visible evolutionary drift over time.'],
   ['producerRate','Producer spawn rate',0,4,.05,
     'How quickly stationary producers emit new free material. This is the main energy input of the ecosystem \u2014 raise it to feed everything, lower it to starve the world.'],
-  ['minAutoReset','Auto-reset threshold',0,20,1,
+  ['nMinAutoReset','Auto-reset threshold',0,20,1,
     'When the number of living automatons drops to this value or below, the simulation is reset automatically. Prevents the world from becoming empty. Set to 0 to disable.'],
   ['Initial populations (apply on Reset)', null],
   ['nProducer','Producers',0,12,1,'Anchored generators that create free material. The base of the food chain.','producer'],
@@ -1423,7 +1423,7 @@ function loop(now){
   if (dt > .1) dt = .1;          // tab-return clamp
   // auto-reset when population collapses below threshold
   autoResetCooldown -= dt;
-  if (!P.paused && P.minAutoReset > 0 && autos.size <= P.minAutoReset && autoResetCooldown <= 0){
+  if (!P.paused && P.nMinAutoReset > 0 && autos.size <= P.nMinAutoReset && autoResetCooldown <= 0){
     seedWorld();
     autoResetCooldown = 4;
   }
