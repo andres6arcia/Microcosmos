@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Microcosmos — Mechanical Ecosystem</title>
+<title>Microcosmos v3 — Mechanical Ecosystem</title>
 <style>
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
@@ -231,6 +231,9 @@ class Auto {
     this.host = null;       // for invader
     this.injected = 0;
     this.targetId = 0;
+    this.latch = 0;         // capsule: id of collective it's stuck to (parasitism)
+    this.immobile = false;  // collective: lost mobility (stuck on capsule/filament)
+    this.gaveToFil = false; // collective: already paid half its catch to a filament
     // ---- per-individual random parameters (§7), mutated from parent ----
     const m = (v, s) => parent ? Math.max(0.15, v * (1 + gauss()*0.12*P.mutation)) : v * rr(1-s, 1+s);
     const pp = parent ? parent.g : null;
@@ -492,8 +495,19 @@ function physics(dt){
       // collision-induced dysfunction between distinct automatons
       if (P.collideMalf > 0 && powner[i] >= 0 && powner[j] >= 0 &&
           powner[i] !== powner[j] && rnd() < P.collideMalf * 0.0012){
-        const A = autos.get(rnd() < .5 ? powner[i] : powner[j]);
-        if (A) damage(A, 1);
+        const A = autos.get(powner[i]), B = autos.get(powner[j]);
+        // v3.1 exemptions: these pairs interact via latch/trap rules, not damage
+        const soft = t => t === T.FILAMENT || t === T.CAPSULE;
+        const big  = t => t === T.ABSORBER || t === T.COLLECTIVE;
+        const exempt = A && B && (
+          (A.type === T.FILAMENT && B.type === T.FILAMENT) ||          // filaments never chop each other
+          (soft(A.type) && big(B.type)) || (big(A.type) && soft(B.type)) ||
+          (A.type === T.FILAMENT && B.type === T.INVADER) ||           // trapping, not damage
+          (A.type === T.INVADER && B.type === T.FILAMENT));
+        if (!exempt){
+          const V = rnd() < .5 ? A : B;
+          if (V) damage(V, 1);
+        }
       }
       dx *= f; dy *= f;
       nudge(i, -dx, -dy); nudge(j, dx, dy);
@@ -548,6 +562,44 @@ function absorbFreeNear(a, cx, cy, rad, pull){
     else if (pull) nudge(j, dx/d*pull, dy/d*pull);
   });
   return got;
+}
+
+/* ---- v3.1: shared contact rules for big engulfers (absorber & collective).
+   Touching a filament pins them and costs half their catch; touching a
+   capsule starts the parasitic latch. Returns true if the body is stuck. */
+function bigContactRules(a){
+  const touchR = (a.type === T.COLLECTIVE ? 36 : 20)*a.g.size + 10;
+  if (!a.immobile){
+    for (const v of autos.values()){
+      if (v.type !== T.FILAMENT) continue;
+      let hit = false;
+      for (const i of v.parts){ if (!alive[i]) continue;
+        if ((px[i]-a.x)**2 + (py[i]-a.y)**2 < touchR*touchR){ hit = true; break; } }
+      if (hit){
+        a.immobile = true; a.state = S.MALF; a.malfT = 4;
+        if (!a.gaveToFil){
+          a.gaveToFil = true;
+          const loot = a.parts.filter(i => alive[i] && prole[i] === 0);
+          const half = loot.slice(0, Math.ceil(loot.length/2));
+          for (const i of half) stealParticle(v, i);
+        }
+        break;
+      }
+    }
+  }
+  for (const v of autos.values()){
+    if (v.type !== T.CAPSULE || v.latch) continue;
+    if ((v.x-a.x)**2 + (v.y-a.y)**2 < touchR*touchR){
+      v.latch = a.id;
+      if (v.parts.length >= a.parts.length) a.immobile = true; // bigger capsule pins it
+    }
+  }
+  if (a.immobile){
+    a.state = S.MALF;
+    if (a.parts.length <= 4){ disintegrate(a); return true; }
+    return true;
+  }
+  return false;
 }
 
 function behave(a, dt){
@@ -605,6 +657,37 @@ function behave(a, dt){
       break; }
 
     case T.CAPSULE: {
+      /* ---- v3: parasitic latch onto a collective ---- */
+      if (a.latch){
+        const c = autos.get(a.latch);
+        if (!c || (c.type !== T.COLLECTIVE && c.type !== T.ABSORBER)){ a.latch = 0; }
+        else {
+          // stay stuck to the collective
+          moveToward(a, c.x, c.y, .06);
+          const bigger = a.parts.length > c.parts.length;
+          if (bigger) c.immobile = true;
+          // siphon: steal half of what the collective catches (steady drain),
+          // faster once the capsule has it pinned
+          const rate = (bigger ? 2.2 : 1.0) * a.g.hunger * P.consumeRate;
+          if (rnd() < dt * rate){
+            const loot = c.parts.filter(i => alive[i] && prole[i] === 0);
+            const bite = loot.length ? loot[(rnd()*loot.length)|0]
+              : c.parts.find(i => alive[i] && prole[i] !== 2);
+            if (bite !== undefined) stealParticle(a, bite);
+          }
+          // victory: capsule outgrew the collective -> join all its material
+          if (bigger && c.parts.length <= Math.max(4, baseFull(c.type)*.1)){
+            const ids = c.parts.slice();
+            for (const i of ids) if (alive[i]) stealParticle(a, i);
+            autos.delete(c.id);
+            a.latch = 0;
+          }
+          a.state = S.GATHER;
+          // keep filtering free material too ("plus the normal capsule catching")
+          absorbFreeNear(a, a.x, a.y, 34*a.g.size + a.g.sense*.15, .18);
+          break;
+        }
+      }
       // slow drift + filtration
       a.wob += dt * .4;
       moveToward(a, a.x + Math.cos(a.wob)*40, a.y + Math.sin(a.wob*0.7)*40, .01);
@@ -684,9 +767,23 @@ function behave(a, dt){
             const dx = px[tip]-px[hand], dy = py[tip]-py[hand], d = Math.hypot(dx,dy)||1;
             nudge(hand, dx/d*1.1, dy/d*1.1); // extend arm toward tip
             if (d < 10 && rnd() < dt*2.2*P.consumeRate){
-              stealParticle(a, tip);           // rip the tip off
-              pr[tip] = 2.2; pcol[tip] = 2;
-              damage(tgt, 2);                  // filament malfunction + leak
+              // v3: chopping a filament — the severed tip transforms into a
+              // new CAPSULE automaton; the grabber feeds on the segment below.
+              const tx = px[tip], ty = py[tip];
+              const idx = tgt.parts.indexOf(tip);
+              if (idx >= 0) tgt.parts.splice(idx, 1);
+              for (let b = tgt.bonds.a.length-1; b >= 0; b--)
+                if (tgt.bonds.a[b] === tip || tgt.bonds.b[b] === tip) tgt.bonds.removeAt(b);
+              const born = new Auto(T.CAPSULE, tx, ty, null);
+              if (alive[tip]) stealParticle(born, tip);
+              pr[tip] = 2.6; pcol[tip] = 0; prole[tip] = 0;
+              // grabber's meal: the next segment down
+              const seg = tgt.parts[tgt.parts.length-1];
+              if (seg !== undefined && alive[seg] && prole[seg] !== 2){
+                stealParticle(a, seg);
+                pr[seg] = 2.2; pcol[seg] = 2;
+              }
+              damage(tgt, 2);                  // filament malfunction + leak, then regenerates
             }
           }
         }
@@ -703,10 +800,53 @@ function behave(a, dt){
         const i = a.parts[k];
         if (!alive[i]) continue;
         const ph = a.t*2.2*P.speedMul + k*.8 + a.wob;
-        nudge(i, Math.cos(ph)*.16*k*.28, -.05 + Math.sin(ph*.6)*.05);
+        nudge(i, Math.cos(ph)*.16*Math.min(k,10)*.28, Math.sin(ph*.6)*.06);
       }
-      // regrow slowly by absorbing free material at the tip
-      if (a.parts.length < 8 && a.state !== S.MALF){
+      // v3: grow without limit by absorbing free material at the tip
+      // (dynamic body radius so long chains aren't culled as runaways)
+      a.bodyR = Math.max(30*a.g.size, a.parts.length * 8 * a.g.size);
+
+      /* ---- v3.1: sticky trap for invaders ---- */
+      for (const v of autos.values()){
+        if (v.type !== T.INVADER) continue;
+        const m = v.parts[0];
+        if (m === undefined || !alive[m]) continue;
+        for (const i of a.parts){ if (!alive[i]) continue;
+          const d2 = (px[i]-px[m])**2 + (py[i]-py[m])**2;
+          if (d2 < 12*12){
+            // stuck to the filament; digested shortly after
+            nudge(m, (px[i]-px[m])*.5, (py[i]-py[m])*.5);
+            if (rnd() < dt * 2.5){
+              stealParticle(a, m);
+              pr[m] = 1.8; pcol[m] = 0; prole[m] = 0;
+              autos.delete(v.id);
+            }
+            break;
+          }
+        }
+      }
+
+      /* ---- v3.1: orphan cleanup — chopped segments never float away.
+         A part with no surviving bond becomes a capsule (if it was the tip)
+         or free material (plain segment). Base is exempt. ---- */
+      if (a.parts.length > 2){
+        const bonded = new Set();
+        for (let b = 0; b < a.bonds.a.length; b++){
+          bonded.add(a.bonds.a[b]); bonded.add(a.bonds.b[b]);
+        }
+        for (let k = a.parts.length-1; k >= 1; k--){
+          const i = a.parts[k];
+          if (!alive[i] || bonded.has(i)) continue;
+          a.parts.splice(k,1);
+          if (prole[i] === 2){ // severed tip -> newborn capsule
+            const born = new Auto(T.CAPSULE, px[i], py[i], null);
+            stealParticle(born, i);
+            pr[i] = 2.6; pcol[i] = 0; prole[i] = 0;
+          } else freeMat(i);
+        }
+      }
+
+      if (a.state !== S.MALF && liveCount < popCap*.95){
         const tip = a.parts[a.parts.length-1];
         if (alive[tip] && absorbFreeNear(a, px[tip], py[tip], 20, .1)){
           const ni = a.parts[a.parts.length-1];
@@ -743,9 +883,11 @@ function behave(a, dt){
       break; }
 
     case T.ABSORBER: {
+      // v3.1: same stuck rules as collectives; capsules are no longer prey
+      if (bigContactRules(a)){ if (!autos.has(a.id)) return; break; }
       // chase and swallow smaller assemblies whole
       const tgt = nearestAuto(a, v => v.parts.length < a.parts.length*.6 &&
-        v.type !== T.PRODUCER && v.type !== T.FILAMENT &&
+        v.type !== T.PRODUCER && v.type !== T.FILAMENT && v.type !== T.CAPSULE &&
         (v.type === a.g.prefType ? true : rnd() < .8), a.g.sense*2);
       if (tgt){
         a.state = S.GATHER;
@@ -765,8 +907,12 @@ function behave(a, dt){
       break; }
 
     case T.COLLECTIVE: {
+      /* ---- v3 contact rules (shared with absorbers) ---- */
+      if (bigContactRules(a)){ if (!autos.has(a.id)) return; break; }
       // deformable membrane; extends pseudopods to engulf small assemblies
-      const tgt = nearestAuto(a, v => v.parts.length < 14 && v.type !== T.PRODUCER, a.g.sense*2.5);
+      // (v3: capsules and filaments are no longer prey — they fight back)
+      const tgt = nearestAuto(a, v => v.parts.length < 14 &&
+        v.type !== T.PRODUCER && v.type !== T.CAPSULE && v.type !== T.FILAMENT, a.g.sense*2.5);
       if (tgt){
         a.state = S.GATHER;
         moveToward(a, tgt.x, tgt.y, .02);
@@ -787,7 +933,7 @@ function behave(a, dt){
       }
       absorbFreeNear(a, a.x, a.y, 40*a.g.size, .08);
       // fragment if too big
-      if (a.parts.length > 70) { a.state = S.SPLIT; a.splitT = 2.5; }
+      if (a.parts.length > 70 && !a.immobile) { a.state = S.SPLIT; a.splitT = 2.5; }
       break; }
   }
 
@@ -802,10 +948,11 @@ function behave(a, dt){
       for (const v of autos.values())
         if (v.type === a.type && (v.x-a.x)**2+(v.y-a.y)**2 < 60*60) clus++;
       if (clus >= 3 && rnd() < 0.002 && !Array.from(autos.values()).some(v=>v.type===T.COLLECTIVE && (v.x-a.x)**2+(v.y-a.y)**2 < 300*300)){
-        // fuse cluster into a collective
+        // fuse cluster: capsules become a GRABBER (v3 balance), absorbers a collective
         const members = Array.from(autos.values())
           .filter(v => v.type === a.type && (v.x-a.x)**2+(v.y-a.y)**2 < 70*70);
-        const col = new Auto(T.COLLECTIVE, a.x, a.y, null);
+        const fusedType = a.type === T.CAPSULE ? T.GRABBER : T.COLLECTIVE;
+        const col = new Auto(fusedType, a.x, a.y, null);
         for (const m of members){
           const ids = m.parts.slice();
           for (const i of ids) if (alive[i]) stealParticle(col, i);
@@ -815,9 +962,11 @@ function behave(a, dt){
     }
   }
 
-  // longevity
-  a.g.life -= dt;
-  if (a.g.life <= 0){ a.state = S.MALF; a.malfT = 99; a.g.leak *= 2; a.g.life = 99; }
+  // longevity (v3: filaments are ageless — they grow as long as they can)
+  if (a.type !== T.FILAMENT){
+    a.g.life -= dt;
+    if (a.g.life <= 0){ a.state = S.MALF; a.malfT = 99; a.g.leak *= 2; a.g.life = 99; }
+  }
 }
 
 /* ---------------- Rendering ---------------- */
@@ -1059,12 +1208,12 @@ const sliders = [
     'When the number of living automatons drops to this value or below, the simulation is reset automatically. Prevents the world from becoming empty. Set to 0 to disable.'],
   ['Initial populations (apply on Reset)', null],
   ['nProducer','Producers',0,12,1,'Anchored generators that create free material. The base of the food chain.','producer'],
-  ['nCapsule','Capsules',0,40,1,'Slow elongated drifters that filter free material from the water.','capsule'],
+  ['nCapsule','Capsules',0,40,1,'Slow elongated drifters that filter free material. When touched by a collective they latch on parasitically, siphoning its catch \u2014 and if they outgrow it, they consume it whole. Three idle capsules can fuse into a grabber.','capsule'],
   ['nScavenger','Scavengers',0,30,1,'Small fast automatons that tear particles from the edges of larger bodies.','scavenger'],
   ['nGrabber','Grabbers',0,10,1,'Floating balls with hanging arms that rip the luminous tips off filaments.','grabber'],
-  ['nFilament','Filaments',0,30,1,'Anchored waving dashes with a bright material-rich tip \u2014 favourite prey of grabbers.','filament'],
+  ['nFilament','Filaments',0,30,1,'Ageless anchored dashes that grow without limit. If chopped, the severed tip becomes a new capsule and the body regrows. A collective that touches one is immobilised and loses half its catch to it.','filament'],
   ['nInvader','Invaders',0,20,1,'Tiny parasites that attach to a host, inject material, replicate inside and burst it (lysis).','invader'],
-  ['nAbsorber','Absorbers',0,12,1,'Membrane rings that chase and swallow smaller assemblies whole. Can fuse into collectives.','absorber'],
+  ['nAbsorber','Absorbers',0,12,1,'Membrane rings that chase and swallow smaller assemblies whole. Can fuse into collectives \u2014 but collectives now fear capsules and filaments.','absorber'],
   ['nFree','Free material',0,800,10,'Loose drifting particles present at start \u2014 the initial resource pool.'],
 ];
 // build collapsible sections
